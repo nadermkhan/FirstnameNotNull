@@ -9,11 +9,13 @@ import threading
 from pathlib import Path
 import queue
 import gc
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
 
 class CSVFilterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("CSV Filter - Remove Empty First Names")
+        self.root.title("CSV Multi-Filter - Remove Empty First Names (Up to 5 Files)")
         
         # Color scheme (Light Theme)
         self.bg_color = "#ffffff"  # White background
@@ -22,13 +24,15 @@ class CSVFilterApp:
         self.button_hover = "#d0d0d0"  # Darker gray on hover
         self.accent_color = "#808080"  # Medium gray accent
         self.entry_bg = "#f5f5f5"  # Very light gray for entries
+        self.success_color = "#4CAF50"  # Green for success
+        self.error_color = "#f44336"  # Red for errors
         
         # Configure root
         self.root.configure(bg=self.bg_color)
-        self.root.minsize(700, 600)
+        self.root.minsize(900, 750)
         
         # Center window
-        self.center_window(700, 600)
+        self.center_window(900, 750)
         
         # Configure DPI scaling
         self.setup_dpi_scaling()
@@ -38,12 +42,26 @@ class CSVFilterApp:
         self.title_font = ('Arial', 14, 'bold')
         self.button_font = ('Arial', 11)
         self.credit_font = ('Arial', 9)
+        self.small_font = ('Arial', 9)
         
-        # Variables
-        self.input_file = tk.StringVar()
-        self.output_file = tk.StringVar()
+        # Variables for multiple files
+        self.max_files = 5
+        self.input_files = [tk.StringVar() for _ in range(self.max_files)]
+        self.output_files = [tk.StringVar() for _ in range(self.max_files)]
+        self.file_status = [tk.StringVar(value="") for _ in range(self.max_files)]
         self.progress_queue = queue.Queue()
         self.processing = False
+        
+        # Get optimal number of workers
+        self.num_workers = min(multiprocessing.cpu_count(), 4)
+        
+        # File entries and buttons storage
+        self.input_entries = []
+        self.output_entries = []
+        self.browse_input_btns = []
+        self.browse_output_btns = []
+        self.status_labels = []
+        self.clear_btns = []
         
         # Create UI
         self.create_widgets()
@@ -75,21 +93,35 @@ class CSVFilterApp:
     
     def create_widgets(self):
         """Create all UI widgets"""
-        # Main container
-        main_frame = ttk.Frame(self.root)
-        main_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
-        main_frame.columnconfigure(0, weight=1)
+        # Main container with scrollbar
+        main_canvas = tk.Canvas(self.root, bg=self.bg_color)
+        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=main_canvas.yview)
+        scrollable_frame = ttk.Frame(main_canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all"))
+        )
+        
+        main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        main_canvas.configure(yscrollcommand=scrollbar.set)
+        
+        main_canvas.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        scrollbar.grid(row=0, column=1, sticky="ns", pady=20)
+        
+        # Main frame inside scrollable area
+        main_frame = scrollable_frame
         
         # Configure ttk styles
         self.setup_styles()
         
         # Title with border
         title_frame = tk.Frame(main_frame, bg=self.bg_color, relief=tk.RIDGE, bd=2)
-        title_frame.grid(row=0, column=0, pady=(0, 20))
+        title_frame.grid(row=0, column=0, pady=(0, 10), padx=10, sticky="ew")
         
         title_label = tk.Label(
             title_frame,
-            text="CSV First Name Filter",
+            text="CSV Multi-File First Name Filter",
             font=self.title_font,
             bg=self.bg_color,
             fg=self.fg_color,
@@ -98,110 +130,114 @@ class CSVFilterApp:
         )
         title_label.pack()
         
-        # Input file section
-        input_frame = tk.Frame(main_frame, bg=self.bg_color)
-        input_frame.grid(row=1, column=0, sticky="ew", pady=10)
-        input_frame.columnconfigure(1, weight=1)
-        
-        tk.Label(
-            input_frame,
-            text="Input File:",
-            font=self.main_font,
+        # Info label
+        info_label = tk.Label(
+            main_frame,
+            text=f"Process up to {self.max_files} CSV files simultaneously | Using {self.num_workers} parallel workers",
+            font=self.small_font,
             bg=self.bg_color,
-            fg=self.fg_color,
-            width=12,
-            anchor="w"
-        ).grid(row=0, column=0, padx=(0, 10))
-        
-        self.input_entry = tk.Entry(
-            input_frame,
-            textvariable=self.input_file,
-            font=self.main_font,
-            bg=self.entry_bg,
-            fg=self.fg_color,
-            insertbackground=self.fg_color,
-            relief=tk.SOLID,
-            bd=1
+            fg=self.accent_color
         )
-        self.input_entry.grid(row=0, column=1, sticky="ew", padx=(0, 10))
+        info_label.grid(row=1, column=0, pady=(0, 10))
         
-        self.browse_input_btn = self.create_button(
-            input_frame,
-            "Browse",
-            self.browse_input_file
-        )
-        self.browse_input_btn.grid(row=0, column=2)
-        
-        # Output file section
-        output_frame = tk.Frame(main_frame, bg=self.bg_color)
-        output_frame.grid(row=2, column=0, sticky="ew", pady=10)
-        output_frame.columnconfigure(1, weight=1)
-        
-        tk.Label(
-            output_frame,
-            text="Output File:",
-            font=self.main_font,
-            bg=self.bg_color,
-            fg=self.fg_color,
-            width=12,
-            anchor="w"
-        ).grid(row=0, column=0, padx=(0, 10))
-        
-        self.output_entry = tk.Entry(
-            output_frame,
-            textvariable=self.output_file,
-            font=self.main_font,
-            bg=self.entry_bg,
-            fg=self.fg_color,
-            insertbackground=self.fg_color,
-            relief=tk.SOLID,
-            bd=1
-        )
-        self.output_entry.grid(row=0, column=1, sticky="ew", padx=(0, 10))
-        
-        self.browse_output_btn = self.create_button(
-            output_frame,
-            "Browse",
-            self.browse_output_file
-        )
-        self.browse_output_btn.grid(row=0, column=2)
-        
-        # Process button
-        self.process_btn = self.create_button(
+        # Files section
+        files_frame = tk.LabelFrame(
             main_frame,
-            "Process CSV",
-            self.process_csv,
-            width=20,
-            special=True
-        )
-        self.process_btn.grid(row=3, column=0, pady=20)
-        
-        # Progress bar
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(
-            main_frame,
-            variable=self.progress_var,
-            maximum=100,
-            style="Custom.Horizontal.TProgressbar"
-        )
-        self.progress_bar.grid(row=4, column=0, sticky="ew", pady=(0, 10))
-        
-        # Statistics frame
-        stats_frame = tk.LabelFrame(
-            main_frame,
-            text="Statistics",
+            text="Files to Process",
             font=self.main_font,
             bg=self.bg_color,
             fg=self.fg_color,
             relief=tk.GROOVE,
             bd=2
         )
-        stats_frame.grid(row=5, column=0, sticky="ew", pady=10)
+        files_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
+        
+        # Create file input/output rows
+        for i in range(self.max_files):
+            self.create_file_row(files_frame, i)
+        
+        # Control buttons frame
+        control_frame = tk.Frame(main_frame, bg=self.bg_color)
+        control_frame.grid(row=3, column=0, pady=15)
+        
+        # Clear All button
+        self.clear_all_btn = self.create_button(
+            control_frame,
+            "Clear All",
+            self.clear_all_files,
+            width=12
+        )
+        self.clear_all_btn.grid(row=0, column=0, padx=5)
+        
+        # Process button
+        self.process_btn = self.create_button(
+            control_frame,
+            "Process All Files",
+            self.process_all_csv,
+            width=20,
+            special=True
+        )
+        self.process_btn.grid(row=0, column=1, padx=5)
+        
+        # Auto-fill button
+        self.autofill_btn = self.create_button(
+            control_frame,
+            "Auto-Fill Outputs",
+            self.autofill_outputs,
+            width=15
+        )
+        self.autofill_btn.grid(row=0, column=2, padx=5)
+        
+        # Overall progress bar
+        progress_frame = tk.LabelFrame(
+            main_frame,
+            text="Overall Progress",
+            font=self.main_font,
+            bg=self.bg_color,
+            fg=self.fg_color,
+            relief=tk.GROOVE,
+            bd=2
+        )
+        progress_frame.grid(row=4, column=0, sticky="ew", padx=10, pady=10)
+        
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(
+            progress_frame,
+            variable=self.progress_var,
+            maximum=100,
+            style="Custom.Horizontal.TProgressbar"
+        )
+        self.progress_bar.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        
+        self.progress_label = tk.Label(
+            progress_frame,
+            text="Ready",
+            font=self.small_font,
+            bg=self.bg_color,
+            fg=self.fg_color
+        )
+        self.progress_label.grid(row=1, column=0, pady=(0, 10))
+        
+        # Statistics frame
+        stats_frame = tk.LabelFrame(
+            main_frame,
+            text="Processing Statistics",
+            font=self.main_font,
+            bg=self.bg_color,
+            fg=self.fg_color,
+            relief=tk.GROOVE,
+            bd=2
+        )
+        stats_frame.grid(row=5, column=0, sticky="ew", padx=10, pady=10)
         stats_frame.columnconfigure(0, weight=1)
         
+        # Create scrolled text for statistics
+        stats_container = tk.Frame(stats_frame, bg=self.bg_color)
+        stats_container.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        
         self.stats_text = tk.Text(
-            stats_frame,
-            height=6,
+            stats_container,
+            height=8,
             font=self.main_font,
             bg=self.entry_bg,
             fg=self.fg_color,
@@ -209,13 +245,17 @@ class CSVFilterApp:
             bd=1,
             wrap=tk.WORD
         )
-        self.stats_text.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        self.stats_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        stats_scroll = ttk.Scrollbar(stats_container, command=self.stats_text.yview)
+        stats_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.stats_text.config(yscrollcommand=stats_scroll.set)
         
         # Credits section with gray background
         credits_frame = tk.Frame(main_frame, bg=self.accent_color, relief=tk.RAISED, bd=1)
-        credits_frame.grid(row=6, column=0, sticky="ew", pady=(20, 0))
+        credits_frame.grid(row=6, column=0, sticky="ew", padx=10, pady=(20, 10))
         
-        credits_text = """Developed By: Nader Mahbub Khan
+        credits_text = """Enhanced Multi-File Version | Developed By: Nader Mahbub Khan
 Software Engineer | Web Developer
 Phone: 01642817116 | Email: muhammadnadermahbubkhan@gmail.com"""
         
@@ -224,9 +264,110 @@ Phone: 01642817116 | Email: muhammadnadermahbubkhan@gmail.com"""
             text=credits_text,
             font=self.credit_font,
             bg=self.accent_color,
-            fg=self.bg_color,  # White text on gray background
+            fg=self.bg_color,
             justify=tk.CENTER
         ).pack(pady=10)
+    
+    def create_file_row(self, parent, index):
+        """Create a row for file input/output"""
+        row_frame = tk.Frame(parent, bg=self.bg_color)
+        row_frame.grid(row=index, column=0, sticky="ew", padx=10, pady=5)
+        row_frame.columnconfigure(2, weight=1)
+        row_frame.columnconfigure(5, weight=1)
+        
+        # File number
+        tk.Label(
+            row_frame,
+            text=f"File {index + 1}:",
+            font=self.main_font,
+            bg=self.bg_color,
+            fg=self.fg_color,
+            width=6
+        ).grid(row=0, column=0, padx=(0, 5))
+        
+        # Input section
+        tk.Label(
+            row_frame,
+            text="Input:",
+            font=self.small_font,
+            bg=self.bg_color,
+            fg=self.fg_color
+        ).grid(row=0, column=1, padx=(0, 5))
+        
+        input_entry = tk.Entry(
+            row_frame,
+            textvariable=self.input_files[index],
+            font=self.small_font,
+            bg=self.entry_bg,
+            fg=self.fg_color,
+            relief=tk.SOLID,
+            bd=1,
+            width=30
+        )
+        input_entry.grid(row=0, column=2, sticky="ew", padx=(0, 5))
+        self.input_entries.append(input_entry)
+        
+        browse_input = self.create_button(
+            row_frame,
+            "📁",
+            lambda idx=index: self.browse_input_file(idx),
+            width=3
+        )
+        browse_input.grid(row=0, column=3, padx=(0, 10))
+        self.browse_input_btns.append(browse_input)
+        
+        # Output section
+        tk.Label(
+            row_frame,
+            text="Output:",
+            font=self.small_font,
+            bg=self.bg_color,
+            fg=self.fg_color
+        ).grid(row=0, column=4, padx=(0, 5))
+        
+        output_entry = tk.Entry(
+            row_frame,
+            textvariable=self.output_files[index],
+            font=self.small_font,
+            bg=self.entry_bg,
+            fg=self.fg_color,
+            relief=tk.SOLID,
+            bd=1,
+            width=30
+        )
+        output_entry.grid(row=0, column=5, sticky="ew", padx=(0, 5))
+        self.output_entries.append(output_entry)
+        
+        browse_output = self.create_button(
+            row_frame,
+            "💾",
+            lambda idx=index: self.browse_output_file(idx),
+            width=3
+        )
+        browse_output.grid(row=0, column=6, padx=(0, 5))
+        self.browse_output_btns.append(browse_output)
+        
+        # Clear button
+        clear_btn = self.create_button(
+            row_frame,
+            "✖",
+            lambda idx=index: self.clear_file_row(idx),
+            width=3
+        )
+        clear_btn.grid(row=0, column=7, padx=(0, 5))
+        self.clear_btns.append(clear_btn)
+        
+        # Status label
+        status_label = tk.Label(
+            row_frame,
+            textvariable=self.file_status[index],
+            font=self.small_font,
+            bg=self.bg_color,
+            fg=self.accent_color,
+            width=10
+        )
+        status_label.grid(row=0, column=8, padx=(5, 0))
+        self.status_labels.append(status_label)
     
     def setup_styles(self):
         """Setup ttk styles"""
@@ -236,8 +377,8 @@ Phone: 01642817116 | Email: muhammadnadermahbubkhan@gmail.com"""
         # Progress bar style - gray theme
         style.configure(
             "Custom.Horizontal.TProgressbar",
-            background=self.accent_color,  # Gray progress
-            troughcolor=self.entry_bg,  # Light gray trough
+            background=self.accent_color,
+            troughcolor=self.entry_bg,
             bordercolor=self.accent_color,
             lightcolor=self.accent_color,
             darkcolor=self.accent_color
@@ -246,12 +387,10 @@ Phone: 01642817116 | Email: muhammadnadermahbubkhan@gmail.com"""
     def create_button(self, parent, text, command, width=10, special=False):
         """Create a styled button"""
         if special:
-            # Special button (Process CSV) - darker
             bg = self.accent_color
             fg = self.bg_color
             hover_bg = "#606060"
         else:
-            # Regular buttons
             bg = self.button_bg
             fg = self.fg_color
             hover_bg = self.button_hover
@@ -267,52 +406,86 @@ Phone: 01642817116 | Email: muhammadnadermahbubkhan@gmail.com"""
             activeforeground=fg,
             relief=tk.RAISED,
             bd=1,
-            padx=15,
+            padx=10,
             pady=5,
             width=width,
             cursor="hand2"
         )
         
-        # Hover effects
         btn.bind("<Enter>", lambda e: btn.config(bg=hover_bg))
         btn.bind("<Leave>", lambda e: btn.config(bg=bg))
         
         return btn
     
-    def browse_input_file(self):
+    def browse_input_file(self, index):
         """Browse for input CSV file"""
         filename = filedialog.askopenfilename(
-            title="Select Input CSV File",
+            title=f"Select Input CSV File {index + 1}",
             filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
         )
         if filename:
-            self.input_file.set(filename)
+            self.input_files[index].set(filename)
+            self.file_status[index].set("")
     
-    def browse_output_file(self):
+    def browse_output_file(self, index):
         """Browse for output CSV file location"""
+        default_name = ""
+        if self.input_files[index].get():
+            input_path = Path(self.input_files[index].get())
+            default_name = f"{input_path.stem}_filtered.csv"
+        
         filename = filedialog.asksaveasfilename(
-            title="Save Filtered CSV As",
+            title=f"Save Filtered CSV {index + 1} As",
             defaultextension=".csv",
+            initialfile=default_name,
             filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
         )
         if filename:
-            self.output_file.set(filename)
+            self.output_files[index].set(filename)
     
-    def process_csv(self):
-        """Process the CSV file in a separate thread"""
+    def clear_file_row(self, index):
+        """Clear a specific file row"""
+        self.input_files[index].set("")
+        self.output_files[index].set("")
+        self.file_status[index].set("")
+    
+    def clear_all_files(self):
+        """Clear all file inputs and outputs"""
+        for i in range(self.max_files):
+            self.clear_file_row(i)
+        self.stats_text.delete(1.0, tk.END)
+        self.progress_var.set(0)
+        self.progress_label.config(text="Ready")
+    
+    def autofill_outputs(self):
+        """Auto-generate output filenames based on input files"""
+        for i in range(self.max_files):
+            if self.input_files[i].get() and not self.output_files[i].get():
+                input_path = Path(self.input_files[i].get())
+                output_path = input_path.parent / f"{input_path.stem}_filtered.csv"
+                self.output_files[i].set(str(output_path))
+    
+    def get_valid_file_pairs(self):
+        """Get list of valid input/output file pairs"""
+        valid_pairs = []
+        for i in range(self.max_files):
+            if self.input_files[i].get() and self.output_files[i].get():
+                if not os.path.exists(self.input_files[i].get()):
+                    self.file_status[i].set("❌ Not Found")
+                    continue
+                valid_pairs.append((i, self.input_files[i].get(), self.output_files[i].get()))
+                self.file_status[i].set("⏳ Queued")
+        return valid_pairs
+    
+    def process_all_csv(self):
+        """Process all CSV files in parallel"""
         if self.processing:
             return
         
-        if not self.input_file.get():
-            messagebox.showerror("Error", "Please select an input file")
-            return
+        valid_pairs = self.get_valid_file_pairs()
         
-        if not self.output_file.get():
-            messagebox.showerror("Error", "Please select an output file location")
-            return
-        
-        if not os.path.exists(self.input_file.get()):
-            messagebox.showerror("Error", "Input file does not exist")
+        if not valid_pairs:
+            messagebox.showerror("Error", "No valid file pairs found. Please select at least one input and output file.")
             return
         
         self.processing = True
@@ -321,51 +494,48 @@ Phone: 01642817116 | Email: muhammadnadermahbubkhan@gmail.com"""
         self.progress_var.set(0)
         
         # Start processing in separate thread
-        thread = threading.Thread(target=self.process_csv_thread, daemon=True)
+        thread = threading.Thread(target=self.process_files_thread, args=(valid_pairs,), daemon=True)
         thread.start()
         
         # Start monitoring progress
         self.monitor_progress()
     
-    def process_csv_thread(self):
-        """Process CSV in separate thread for non-blocking UI"""
+    def process_single_csv(self, file_index, input_file, output_file):
+        """Process a single CSV file (optimized for parallel execution)"""
         try:
             start_time = time.time()
-            
-            # Update progress
-            self.progress_queue.put(("status", "Reading CSV file..."))
-            self.progress_queue.put(("progress", 10))
+            self.file_status[file_index].set("🔄 Processing")
             
             # Read CSV with optimization
-            chunk_size = 10000  # Process in chunks for memory efficiency
+            chunk_size = 50000  # Larger chunks for better performance
             total_rows = 0
             captured_rows = 0
             skipped_rows = 0
             
-            # Count total rows first (fast method)
-            with open(self.input_file.get(), 'r', encoding='utf-8-sig') as f:
-                total_rows = sum(1 for line in f) - 1  # Subtract header
+            # Quick row count
+            with open(input_file, 'r', encoding='utf-8-sig') as f:
+                total_rows = sum(1 for line in f) - 1
             
-            self.progress_queue.put(("status", f"Processing {total_rows} rows..."))
-            self.progress_queue.put(("progress", 20))
-            
-            # Process chunks
+            # Process chunks with optimized settings
             filtered_chunks = []
             
-            for chunk_num, chunk in enumerate(pd.read_csv(
-                self.input_file.get(),
+            # Use engine='c' for faster parsing
+            reader = pd.read_csv(
+                input_file,
                 chunksize=chunk_size,
                 encoding='utf-8-sig',
+                engine='c',  # C engine is faster
                 low_memory=False,
-                na_values=['', ' ', '  '],  # Treat these as NaN
+                na_values=['', ' ', '  '],
                 keep_default_na=True
-            )):
-                # Filter rows where 'First Name' is not null/empty/whitespace
+            )
+            
+            for chunk in reader:
                 if 'First Name' in chunk.columns:
-                    # Efficient filtering
-                    mask = chunk['First Name'].notna() & \
-                           (chunk['First Name'].astype(str).str.strip() != '')
-                    filtered_chunk = chunk[mask]
+                    # Vectorized operation for better performance
+                    first_name_col = chunk['First Name']
+                    mask = first_name_col.notna() & (first_name_col.astype(str).str.strip() != '')
+                    filtered_chunk = chunk.loc[mask]
                     
                     captured_rows += len(filtered_chunk)
                     skipped_rows += len(chunk) - len(filtered_chunk)
@@ -373,52 +543,146 @@ Phone: 01642817116 | Email: muhammadnadermahbubkhan@gmail.com"""
                     if not filtered_chunk.empty:
                         filtered_chunks.append(filtered_chunk)
                 else:
-                    messagebox.showerror("Error", "Column 'First Name' not found in CSV")
-                    return
-                
-                # Update progress
-                progress = 20 + (chunk_num * chunk_size / total_rows * 60)
-                self.progress_queue.put(("progress", min(progress, 80)))
+                    raise ValueError(f"Column 'First Name' not found in {os.path.basename(input_file)}")
             
-            self.progress_queue.put(("status", "Writing filtered data..."))
-            self.progress_queue.put(("progress", 85))
-            
-            # Combine and save
+            # Combine and save with optimization
             if filtered_chunks:
                 result_df = pd.concat(filtered_chunks, ignore_index=True)
+                # Use faster CSV writing
                 result_df.to_csv(
-                    self.output_file.get(),
+                    output_file,
                     index=False,
-                    encoding='utf-8-sig'
+                    encoding='utf-8-sig',
+                    chunksize=chunk_size  # Write in chunks too
                 )
-                del result_df  # Free memory
+                del result_df
             else:
-                # Create empty CSV with headers if no data
                 pd.DataFrame(columns=chunk.columns).to_csv(
-                    self.output_file.get(),
+                    output_file,
                     index=False,
                     encoding='utf-8-sig'
                 )
             
-            # Clean up memory
+            # Clean up
             del filtered_chunks
             gc.collect()
             
-            self.progress_queue.put(("progress", 100))
-            
-            # Calculate statistics
             processing_time = time.time() - start_time
             
-            stats = f"""Processing Complete!
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 Total Rows Found: {total_rows:,}
-✅ Captured Rows: {captured_rows:,}
-❌ Skipped Rows: {skipped_rows:,}
-⏱️ Processing Time: {processing_time:.2f} seconds
-📁 Output File: {os.path.basename(self.output_file.get())}"""
+            # Return statistics
+            return {
+                'file_index': file_index,
+                'input_file': os.path.basename(input_file),
+                'output_file': os.path.basename(output_file),
+                'total_rows': total_rows,
+                'captured_rows': captured_rows,
+                'skipped_rows': skipped_rows,
+                'processing_time': processing_time,
+                'success': True,
+                'error': None
+            }
             
-            self.progress_queue.put(("stats", stats))
-            self.progress_queue.put(("complete", True))
+        except Exception as e:
+            return {
+                'file_index': file_index,
+                'input_file': os.path.basename(input_file),
+                'output_file': os.path.basename(output_file),
+                'success': False,
+                'error': str(e)
+            }
+    
+    def process_files_thread(self, valid_pairs):
+        """Process multiple CSV files in parallel threads"""
+        try:
+            overall_start = time.time()
+            total_files = len(valid_pairs)
+            
+            self.progress_queue.put(("status", f"Processing {total_files} file(s) in parallel..."))
+            self.progress_queue.put(("progress_label", f"0/{total_files} files completed"))
+            
+            results = []
+            completed = 0
+            
+            # Use ThreadPoolExecutor for parallel processing
+            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                # Submit all tasks
+                future_to_file = {
+                    executor.submit(
+                        self.process_single_csv, 
+                        file_index, 
+                        input_file, 
+                        output_file
+                    ): (file_index, input_file, output_file)
+                    for file_index, input_file, output_file in valid_pairs
+                }
+                
+                # Process completed tasks
+                for future in as_completed(future_to_file):
+                    file_index, input_file, output_file = future_to_file[future]
+                    
+                    try:
+                        result = future.result()
+                        results.append(result)
+                        
+                        if result['success']:
+                            self.file_status[file_index].set("✅ Complete")
+                            status_msg = f"✅ File {file_index + 1}: {result['input_file']} - Captured {result['captured_rows']:,} rows"
+                        else:
+                            self.file_status[file_index].set("❌ Error")
+                            status_msg = f"❌ File {file_index + 1}: {result['input_file']} - Error: {result['error']}"
+                        
+                        self.progress_queue.put(("status", status_msg))
+                        
+                    except Exception as e:
+                        self.file_status[file_index].set("❌ Failed")
+                        self.progress_queue.put(("status", f"❌ File {file_index + 1} failed: {str(e)}"))
+                    
+                    completed += 1
+                    progress = (completed / total_files) * 100
+                    self.progress_queue.put(("progress", progress))
+                    self.progress_queue.put(("progress_label", f"{completed}/{total_files} files completed"))
+            
+            # Calculate overall statistics
+            overall_time = time.time() - overall_start
+            successful_files = sum(1 for r in results if r.get('success', False))
+            failed_files = len(results) - successful_files
+            
+            total_rows_all = sum(r.get('total_rows', 0) for r in results if r.get('success', False))
+            captured_rows_all = sum(r.get('captured_rows', 0) for r in results if r.get('success', False))
+            skipped_rows_all = sum(r.get('skipped_rows', 0) for r in results if r.get('success', False))
+            
+            # Generate detailed statistics
+            stats_text = f"""
+╔══════════════════════════════════════════════════════════╗
+║                   PROCESSING COMPLETE                      ║
+╚══════════════════════════════════════════════════════════╝
+
+📊 OVERALL STATISTICS:
+━━━━━━━━━━━━━━━━━━━━━━
+• Files Processed: {successful_files}/{total_files}
+• Failed Files: {failed_files}
+• Total Rows Processed: {total_rows_all:,}
+• Total Captured: {captured_rows_all:,}
+• Total Skipped: {skipped_rows_all:,}
+• Total Processing Time: {overall_time:.2f} seconds
+• Average Speed: {total_rows_all/overall_time:.0f} rows/second
+
+📁 FILE DETAILS:
+━━━━━━━━━━━━━━━"""
+            
+            for result in results:
+                if result.get('success', False):
+                    stats_text += f"""
+File: {result['input_file']}
+  ✅ Captured: {result['captured_rows']:,} | Skipped: {result['skipped_rows']:,}
+  ⏱️ Time: {result['processing_time']:.2f}s | Speed: {result['total_rows']/result['processing_time']:.0f} rows/s"""
+                else:
+                    stats_text += f"""
+File: {result['input_file']}
+  ❌ Error: {result['error']}"""
+            
+            self.progress_queue.put(("stats", stats_text))
+            self.progress_queue.put(("complete", (successful_files, failed_files)))
             
         except Exception as e:
             self.progress_queue.put(("error", str(e)))
@@ -431,6 +695,8 @@ Phone: 01642817116 | Email: muhammadnadermahbubkhan@gmail.com"""
                 
                 if msg_type == "progress":
                     self.progress_var.set(msg_data)
+                elif msg_type == "progress_label":
+                    self.progress_label.config(text=msg_data)
                 elif msg_type == "status":
                     self.stats_text.insert(tk.END, msg_data + "\n")
                     self.stats_text.see(tk.END)
@@ -438,13 +704,26 @@ Phone: 01642817116 | Email: muhammadnadermahbubkhan@gmail.com"""
                     self.stats_text.delete(1.0, tk.END)
                     self.stats_text.insert(tk.END, msg_data)
                 elif msg_type == "complete":
+                    successful, failed = msg_data
                     self.processing = False
-                    self.process_btn.config(state=tk.NORMAL, text="Process CSV")
-                    messagebox.showinfo("Success", "CSV filtering completed successfully!")
+                    self.process_btn.config(state=tk.NORMAL, text="Process All Files")
+                    self.progress_label.config(text="Complete!")
+                    
+                    if failed > 0:
+                        messagebox.showwarning(
+                            "Processing Complete", 
+                            f"Processing completed!\n✅ Successful: {successful} files\n❌ Failed: {failed} files\n\nCheck the statistics for details."
+                        )
+                    else:
+                        messagebox.showinfo(
+                            "Success", 
+                            f"All {successful} file(s) processed successfully!"
+                        )
                     return
                 elif msg_type == "error":
                     self.processing = False
-                    self.process_btn.config(state=tk.NORMAL, text="Process CSV")
+                    self.process_btn.config(state=tk.NORMAL, text="Process All Files")
+                    self.progress_label.config(text="Error!")
                     messagebox.showerror("Error", f"An error occurred: {msg_data}")
                     return
         except queue.Empty:
@@ -464,6 +743,15 @@ def main():
         pass
     
     app = CSVFilterApp(root)
+    
+    # Bind mousewheel to canvas for scrolling
+    def on_mousewheel(event):
+        canvas = root.winfo_children()[0]
+        if isinstance(canvas, tk.Canvas):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    
+    root.bind_all("<MouseWheel>", on_mousewheel)
+    
     root.mainloop()
 
 if __name__ == "__main__":
