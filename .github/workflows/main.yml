@@ -35,7 +35,7 @@ jobs:
     
     - name: Build EXE with PyInstaller
       run: |
-        pyinstaller --onefile --windowed --name="CSV-FIRSTNAME_FILTER" --add-data="*.py;."  --hidden-import="pandas" --hidden-import="tkinter" main.py
+        pyinstaller --onefile --windowed --name="CSV-FIRSTNAME_FILTER" --add-data="*.py;."  --hidden-import="pandas" --hidden-import="numpy"  --hidden-import="tkinter" main.py
     
     - name: Create Release Package
       run: |
